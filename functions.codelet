@@ -1,0 +1,72 @@
+# we should use ruby of low version, so we cannot make full use of hash functions
+# but made primitive ones.
+
+# access log items --> hash
+# these functions assumes hash must not be nil.
+
+# formatted as logstash configuration part
+# value must be number (float or integer)
+
+        ruby {
+          init => '
+    def add_val(path, namespace, container_name, method, response_code, protocol,
+        x_forwarded_for, pod_name, value, x)
+      if !x[path] ; x[path] = {} ; end
+      if !x[path][namespace] ; x[path][namespace] = {}; end
+      if !x[path][namespace][container_name] ; x[path][namespace][container_name] = {}; end
+      if !x[path][namespace][container_name][method] ; x[path][namespace][container_name][method] = {}; end
+      if !x[path][namespace][container_name][method][response_code]
+        x[path][namespace][container_name][method][response_code] = {}
+      end
+      if !x[path][namespace][container_name][method][response_code][protocol]
+        x[path][namespace][container_name][method][response_code][protocol] = {}
+      end
+      if !x[path][namespace][container_name][method][response_code][protocol][x_forwarded_for]
+        x[path][namespace][container_name][method][response_code][protocol][x_forwarded_for] = {}
+      end
+      if !x[path][namespace][container_name][method][response_code][protocol][x_forwarded_for][pod_name]
+        x[path][namespace][container_name][method][response_code][protocol][x_forwarded_for][pod_name] = 0
+      end
+      x[path][namespace][container_name][method][response_code][protocol][x_forwarded_for][pod_name] += value
+    end
+
+    def get_val(path, namespace, container_name, method, response_code, protocol,
+        x_forwarded_for, pod_name, x)
+      return (x && x[path] && x[path][namespace] && x[path][namespace][container_name] &&
+      x[path][namespace][container_name][method] &&
+      x[path][namespace][container_name][method][response_code][protocol] &&
+      x[path][namespace][container_name][method][response_code][protocol][x_forwarded_for] &&
+      x[path][namespace][container_name][method][response_code][protocol][x_forwarded_for][pod_name] ) || 0
+    end
+    
+    @@bytes_value_hash = {}
+    @@usecs_value_hash = {}
+    @@count_hash = {}
+    '
+    
+        code => '
+    path=event.get("path")
+    namespace=event.get("kubernetes.namespace")
+    container_name = event.get("kubernetes.container_name")
+    method = event.get("method")
+    response_code = event.get("response_code")
+    protocol = event.get("protocol")
+    x_forwarded_for = event.get("x_forwarded_for")
+    pod_name = event.get("kubernetes.pod")
+    usecs = event.get("usecs")
+    bytes = event.get("bytes")
+    if ( !path || !namespace || !container_name || !method || !response_code || !protocol || !x_forwarded_for || !pod_name )
+      puts "nil value found: path=#{path}, ns=#{namespace}, cn=#{container_name}, mth=#{method}, rc=#{response_code}, prt=#{protocol}, xf=#{x_forwarded_for}, pod_name=#{pod_name}, usecs=#{usecs}, bytes=#{bytes} "
+    end
+    add_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, bytes.to_i, @@bytes_value_hash)
+    add_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, usecs.to_i, @@usecs_value_hash)
+    add_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, 1, @@count_hash)
+    if ( path=="/actuator/info" && namespace=="mtw-stg" && container_name=="bff-spring-mobile" && method=="GET" && response_code == "200" && protocol="HTTP/1.1" && x_forwarded_for == "-" )
+      #temp_val = @@count_hash[path][namespace][container_name][method][response_code][protocol][x_forwarded_for][pod_name]
+      #puts "temp value for debugging : #{temp_val}"
+    end
+    event.set("accesslog_bytes", get_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, @@bytes_value_hash))
+    event.set("accesslog_resptime", get_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, @@usecs_value_hash))
+    event.set("accesslog_bytes_count", get_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, @@count_hash))
+    event.set("accesslog_resptime_count", get_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, @@count_hash))
+    '
