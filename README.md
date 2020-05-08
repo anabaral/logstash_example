@@ -26,6 +26,82 @@ counter 타입의 메트릭 여럿을 sum 해도 원칙적으로는 counter여�
 위와 같은 문제를 해결하려면 scrape 시점마다 "수집된 모든" 메트릭들을 다 응답할 수 있도록 계속 준비해 주어야 하는데
 logstash는 수집 전달되는 로그 기반으로 동작하므로 그게 안될 수 있다.
 즉 우리에게 필요한 것은 input은 file/filebeat/fluentd 등으로 수집하더라도 output은 주기적으로 실행되는 무엇이어야 한다.
-그게 뭘까? 아직 결론을 내지 못했다.
+이를 구현하기 위해 heartbeat 를 사용했다:
+
+```
+    input {
+      beats {
+        ...
+      }
+      heartbeat {
+        interval => 15
+        type => "heartbeat"
+      }
+    }
+
+    filter {
+      if [type] == "kube-logs" {
+        ... # from beats
+      }
+    }
+
+    filter {  # 이걸 위해 해시와 함수들을 따로 만듬. 낮은 버전의 ruby를 써야 해서 고급진 함수들을 활용 못함 ㅠ_ㅠ
+      if [type] == "heartbeat" {
+        ruby {
+          code => '
+    @@message = ""
+    accesslog_resptime_sum = ""
+    accesslog_resptime_count = ""
+    accesslog_bytes_sum = ""
+    accesslog_bytes_count = ""
+    @@count_hash.each { |path, v|
+      v.each { |namespace, v|
+        v.each { |container_name, v|
+          v.each { |method, v|
+            v.each {|response_code, v|
+              v.each {|protocol, v|
+                v.each {|x_forwarded_for, v|
+                  v.each{|pod_name, v|
+                    shortpath = path.gsub(/[?].*/, "")
+                    #puts get_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, @@usecs_value_hash)
+                    accesslog_resptime_sum << "accesslog_resptime_sum{ctxroot=\"#{shortpath}\",path=\"#{path}\",msa_namespace=\"#{namespace}\",msa_app=\"#{container_name}\",method=\"#{method}\",respcode=\"#{response_code}\",protocol=\"#{protocol}\",forwarded=\"#{x_forwarded_for}\",pod=\"#{pod_name}\"} " << get_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, @@usecs_value_hash).to_s << "\n"
+                    accesslog_resptime_count << "accesslog_resptime_count{ctxroot=\"#{shortpath}\",path=\"#{path}\",msa_namespace=\"#{namespace}\",msa_app=\"#{container_name}\",method=\"#{method}\",respcode=\"#{response_code}\",protocol=\"#{protocol}\",forwarded=\"#{x_forwarded_for}\",pod=\"#{pod_name}\"} #{v}" << "\n"
+                    accesslog_bytes_sum << "accesslog_bytes_sum{ctxroot=\"#{shortpath}\",path=\"#{path}\",msa_namespace=\"#{namespace}\",msa_app=\"#{container_name}\",method=\"#{method}\",respcode=\"#{response_code}\",protocol=\"#{protocol}\",forwarded=\"#{x_forwarded_for}\",pod=\"#{pod_name}\"} " << get_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, @@bytes_value_hash).to_s << "\n"
+                    accesslog_bytes_count << "accesslog_bytes_count{ctxroot=\"#{shortpath}\",path=\"#{path}\",msa_namespace=\"#{namespace}\",msa_app=\"#{container_name}\",method=\"#{method}\",respcode=\"#{response_code}\",protocol=\"#{protocol}\",forwarded=\"#{x_forwarded_for}\",pod=\"#{pod_name}\"} #{v}" << "\n"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    @@message << "# TYPE accesslog_resptime summary" << "\n"
+    @@message << accesslog_resptime_sum
+    @@message << accesslog_resptime_count
+    @@message << "# TYPE accesslog_bytes summary" << "\n"
+    @@message << accesslog_bytes_sum
+    @@message << accesslog_bytes_count
+    event.set("metric_msg", @@message)
+    '
+        }
+      }
+    }
+
+    output {
+      if [type] == "heartbeat" {
+        http {
+          url => "http://pushgateway.infra:9091/metrics/job/accesslog"
+          http_method => "put"
+          format => "message"
+          message => "%{metric_msg}"
+        }
+      } else {
+        elasticsearch {
+          ... # index 처리
+        }
+      }
+    }
+```
 
 
