@@ -30,22 +30,57 @@ logstash는 수집 전달되는 로그 기반으로 동작하므로 그게 안�
 
 ```
     input {
-      beats {
+      beats { # 로그 처리는 filebeat 에서 보내주는 걸로
         ...
       }
-      heartbeat {
+      heartbeat { # 로그 처리와는 별도로 heartbeat 설정 
         interval => 15
         type => "heartbeat"
       }
     }
 
-    filter {
-      if [type] == "kube-logs" {
+    filter { 
+      if [type] == "kube-logs" { # 일반 로그 처리
         ... # from beats
       }
-    }
+      if [log] =~ /^ACC\|.*$/ { # access log 처리
+        # 로그 쌓는 prefix 약속을 미리 정했음. 일반적인 포맷은 ipv4+ipv6 등등 고려해서 regex로 수용할 때 굉장히 복잡해져서..
+        mutate {
+          add_tag => ["accesslog"]
+        }
+        ... # 내용 파싱해 여러가지 정보 얻고
+  
+        ruby { # 일반적인 플러그인이 안보여서 루비 코드를 직접 사용
+          ## 함수와 전역변수 선언
+          init => '
+    def add_val(path, namespace, container_name, method, response_code, protocol,
+        x_forwarded_for, pod_name, value, x)
+    ...
+    end
+    
+    def get_val(path, namespace, container_name, method, response_code, protocol,
+        x_forwarded_for, pod_name, x)
+    ...
+    end
+    
+    @@bytes_value_hash={} # 해시 형태로 만들어 둔다
+    @@usecs_value_hash={}
+    @@count_hash={}
+    '
+          ## 로그 한줄 올 때마다 실행하는 코드. 로그에서 추출한 값들을 해당되는 전역변수에 더함
+          code => '
+    ... # 필요한 항목을 변수에 넣고
+    add_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, bytes.to_i, @@bytes_value_hash)
+    add_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, usecs.to_i, @@usecs_value_hash)
+    add_val(path, namespace, container_name, method, response_code, protocol, x_forwarded_for, pod_name, 1, @@count_hash)
+    '
+        }
+      }
+    } 
 
-    filter {  # 이걸 위해 해시와 함수들을 따로 만듬. 낮은 버전의 ruby를 써야 해서 고급진 함수들을 활용 못함 ㅠ_ㅠ
+    filter {  # heartbeat 시점마다 모든 메트릭을 보낼 준비작업을 한다.
+      # 해시와 해시용 함수들을 따로 만듬. 낮은 버전의 ruby를 써야 해서 고급진 함수들을 활용 못함 ㅠ_ㅠ
+      # 모든 메트릭들을 한데 모아 문자열 메시지로 만들어 logstash event 저장소에 넣는 게 하는 일의 전부.
       if [type] == "heartbeat" {
         ruby {
           code => '
@@ -54,6 +89,7 @@ logstash는 수집 전달되는 로그 기반으로 동작하므로 그게 안�
     accesslog_resptime_count = ""
     accesslog_bytes_sum = ""
     accesslog_bytes_count = ""
+    # 해시에 등록된 모든 값들을 다 뿌려주기 이해 이런 코드를 사용함.. 버전 낮은 ruby 의 한계도 있고..
     @@count_hash.each { |path, v|
       v.each { |namespace, v|
         v.each { |container_name, v|
@@ -104,4 +140,6 @@ logstash는 수집 전달되는 로그 기반으로 동작하므로 그게 안�
     }
 ```
 
+위 코드는 기본적으로 4-space indent 가 걸려 있는데, 이는 원래 그런것이 아니라 이 내용이 k8s 용 configmap yaml 파일의 일부이기 때문이다.
+그냥 logstash configuration 이라면 indent 를 굳이 주지 않아도 된다.
 
